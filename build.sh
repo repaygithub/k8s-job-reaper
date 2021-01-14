@@ -9,7 +9,7 @@ rootdir=$(pwd)
 
 tag=$(git rev-parse HEAD)
 current_branch=$(git branch | grep \* | cut -d ' ' -f2)
-dry_run=true
+dry_run=false
 
 declare -a images_to_build
 if [ "${IMAGE}" != "" ]; then
@@ -67,3 +67,6 @@ function build_and_push() {
 for image in "${images_to_build[@]}"; do
   build_and_push ${image}
 done
+
+#clean up the _output directory
+rm -rf _output

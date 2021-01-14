@@ -1,26 +1,70 @@
-def statusCode = 0
-def dry_run = true
-
-def orgSharedServicesAccountNumber = '232624534379'
-def orgSharedServicesProfile = 'org_shared_services_terraform'
-def region = 'us-west-2'
-def imagesToBuild = ["k8reaper"]
-
-def is_pr() {
-  env.CHANGE_BRANCH && env.CHANGE_TARGET
+def is_prod() {
+  env.TAG_NAME && env.TAG_NAME ==~ /v\d*\.\d*\.\d*/
 }
 
-if (is_pr() && env.CHANGE_TARGET == 'master') {
-  dry_run = true
-} else if (env.BRANCH_NAME == 'master') {
-  dry_run = false
+def is_uat() {
+  env.BRANCH_NAME == 'master'
+}
+
+// TODO remove when complete
+def is_dev() {
+  env.BRANCH_NAME == 'develop'
+}
+
+def is_pr() {
+  if (env.CHANGE_ID) {
+    return true
+  }
+  return false
+}
+
+def label = "worker-${UUID.randomUUID().toString()}"
+def statusCode = 0
+def region           = "us-west-2"
+def region_id        = "usw2"
+def dry_run          = is_pr()
+def cluster_color    = "black"
+def k8s_envs         = [""]
+def orgSharedServicesAccountNumber = '232624534379'
+def orgSharedServicesProfile = 'org_shared_services_admin'
+def githubRepo = "git@github.com:repaygithub/gloo.git"
+def imagesToBuild = ["k8reaper"]
+def repayDevopsBaseImageTag        = "7496bd229ec97d516762fb0d13a095ae7e963aa4"
+def repo_name            = "k8s-job-reaper"
+
+def k8sAccounts = [
+    'uat': '713631314575',
+    'org': '460458929819',
+    'dev': '564327313136',
+    'sandbox': '063619347804',
+    'prod': '374263412026',
+]
+
+def envRealms = [
+     'dev':     'corp',
+     'uat':     'corp',
+     'org':     'org',
+     'sandbox': 'cde',
+     'prod':    'cde',
+]
+def envApplyOrder = [
+  "0_${cluster_color}_${region_id}",
+]
+
+if (is_dev() || (is_pr() && env.CHANGE_TARGET == 'develop')) {
+  k8s_envs      = ['dev']
+} else if (is_uat() || (is_pr() && env.CHANGE_TARGET == 'master')) {
+  k8s_envs      = ['uat', 'org']
+} else if (is_prod()) {
+  k8s_envs      = ['sandbox', 'prod']
 } else {
-  echo 'failing as this job only supports master'
+  echo 'failing as this job only supports master, develop pushes and semantic versioned tags'
   currentBuild.result = 'FAILURE'
   return
 }
 
 podTemplate(
+  label: label,
   containers: [
     containerTemplate(
       name: 'jnlp',
@@ -38,52 +82,100 @@ podTemplate(
       command: 'cat',
       alwaysPullImage: true
     ),
+    containerTemplate(	
+      name: 'repay-devops',	
+      image: "232624534379.dkr.ecr.us-west-2.amazonaws.com/tfops:${repayDevopsBaseImageTag}",	
+      ttyEnabled: true,	
+      command: 'cat',	
+      alwaysPullImage: true,	
+    ),
     containerTemplate(
       name: 'k8sops',
-      image: "232624534379.dkr.ecr.us-west-2.amazonaws.com/k8sops:latest",
+      image: "232624534379.dkr.ecr.us-west-2.amazonaws.com/k8sops:${repayDevopsBaseImageTag}",
       ttyEnabled: true,
       command: 'cat',
       alwaysPullImage: true
     )
   ],
-  imagePullSecrets: ["quay.io"],
   envVars: [
     envVar(key: 'BUILD_NUMBER', value: "${env.BUILD_NUMBER}"),
+    envVar(key: 'REALM'                , value: "${envRealms}"                ),
+    envVar(key: 'COLOR'                , value: "${cluster_color}"        ),
+    envVar(key: 'REGION'               , value: "${region}"               ),
+    envVar(key: 'REGION_ID'            , value: "${region_id}"            ),
+    envVar(key: 'KUBE_ENV'             , value: "${k8s_envs}"            ),
+    envVar(key: 'DRY_RUN'              , value: "${dry_run}"              ),
+    envVar(key: 'ORIGIN_REPO_NAME'     , value: "${repo_name}"            ),
+    envVar(key: 'K8S_ACTIVE_COLOR'     , value: "${cluster_color}"        ),
     secretEnvVar(key: 'AWS_ACCESS_KEY_ID'    , secretName: 'aws-iam', secretKey: 'AWS_ACCESS_KEY_ID'),
-    secretEnvVar(key: 'AWS_SECRET_ACCESS_KEY', secretName: 'aws-iam', secretKey: 'AWS_SECRET_ACCESS_KEY'),
+    secretEnvVar(key: 'AWS_SECRET_ACCESS_KEY', secretName: 'aws-iam', secretKey: 'AWS_SECRET_ACCESS_KEY')
   ],
   volumes: [
     hostPathVolume(mountPath: '/var/run/docker.sock', hostPath: '/var/run/docker.sock'),
   ]
 ){
-  node(POD_LABEL) {
+  node(label) {
     try {
-      notifySlack()
       def myRepo = checkout scm
       def gitCommit = myRepo.GIT_COMMIT
       def gitBranch = myRepo.GIT_BRANCH
       def images = imagesToBuild.join(" ")
-
-      stage("prep build") {
+      k8s_envs.each { k8s_env ->
+        def realm = envRealms[k8s_env]
+        def k8sAccount = k8sAccounts[k8s_env]
+        environment {
+            REALM = realm
+            KUBE_ENV = k8s_env
+        }
+        if(realm == null || realm.isEmpty()) {
+          echo "Will not complete run for ${k8s_env} due to no realm configuration found for it."
+          return
+        }
+        if(dry_run) {
+          echo "Pipeline running with dry run turned on"
+        }     
+        stage("prep build-${k8s_env}") {
+            container('k8sops') {
+              sh "mkdir -p ~/.docker"
+              sh """
+              /scripts/config_aws.sh --k8s-env ${k8s_env} --region ${region}
+              """
+            }
+        }
+        stage("build images") {
+          parallel createImages(imagesToBuild, gitCommit)
+        }
+        stage("push images") {
+          parallel pushImages(imagesToBuild, gitCommit, gitBranch, region,
+                              orgSharedServicesAccountNumber, orgSharedServicesProfile, dry_run)
+        }
+        stage("gomplate and kustomize ${k8s_env}") {
           container('k8sops') {
-            sh "mkdir -p ~/.docker"
-            config_aws(region)
-          }
-      }
-      stage("build images") {
-        parallel createImages(imagesToBuild, gitCommit)
-      }
-      stage("push images") {
-        parallel pushImages(imagesToBuild, gitCommit, gitBranch, region,
-                            orgSharedServicesAccountNumber, orgSharedServicesProfile, dry_run)
-      }
+            sh """
+            /scripts/config_aws.sh --k8s-env ${realm}_${k8s_env} --region ${region}
+            export REALM=${realm}
+            export KUBE_ENV=${k8s_env}
+            /gitops/gomplates.sh
+            DRY_RUN=true /gitops/kustomize.sh
+            """
 
+            if(!is_pr()) {
+              input(message: "Apply K8s changes?")
+
+              sh """
+              export REALM=${realm}
+              export KUBE_ENV=${k8s_env}
+              /gitops/kustomize.sh
+              """
+            }
+          }
+        }
+      }
     } catch (e) {
       currentBuild.result = 'FAILURE'
       throw e
     }
     finally {
-      notifySlack(currentBuild.result)
       stage("cleanup") {
         container('docker') {
             sh "echo all done"
@@ -91,42 +183,6 @@ podTemplate(
       }
     }
   }
-}
-
-def config_aws(region) {
-  // Note: we use the config_aws.sh from the repo here because it doesn't exist
-  // in a container for us at genesis.
-  sh (
-    label: "Create AWS config profiles for ${region}",
-    script: """
-        $WORKSPACE/scripts/config_aws.sh --region ${region}
-    """
-  )
-}
-
-def notifySlack(String buildStatus = 'STARTED') {
-  buildStatus = buildStatus ?: 'SUCCESS'
-
-  def color
-  def emoji
-
-  if (buildStatus == 'STARTED') {
-    color = '#D4DADF'
-    emoji = ':shaler-hair:'
-  } else if (buildStatus == 'SUCCESS') {
-    color = '#BDFFC3'
-    emoji = ':shaler_happy_face:'
-  } else if (buildStatus == 'UNSTABLE') {
-    color = '#FFFE89'
-    emoji = ':shaler_neutral-annoyed:'
-  } else {
-    color = '#FF9FA1'
-    emoji = ':shaler_frown:'
-  }
-
-  def msg = "${buildStatus}: `${env.JOB_NAME}` #${env.BUILD_NUMBER}: ${emoji}\n${env.RUN_DISPLAY_URL}"
-
-  slackSend(color: color, message: msg)
 }
 
 def createImages(images, tag) {
@@ -158,6 +214,8 @@ def pushImages(images, tag, branch, region, orgSharedServicesAccountNumber, orgS
     opMap[image] = {
         stage ("push ${image}") {
             container('k8sops') {
+                // set up credentials for org ss
+                sh "/scripts/config_aws.sh --region ${region}"
                 if (dry_run) {
                     sh "echo dry run: skipping push to ecr"
                 } else {

@@ -1,183 +1,148 @@
-def statusCode = 0
-def dry_run = true
+#! /bin/bash -e
 
-def orgSharedServicesAccountNumber = '232624534379'
-def orgSharedServicesProfile = 'org_shared_services_terraform'
-def region = 'us-west-2'
-def imagesToBuild = ["k8sops", "tfops", "tfops12", "tfops13", "packerops", "blackduckops", "blastdns", "yamale"]
+scriptName="push_to_docker_registry.sh"
+version="2.0.0"
+maintainer="Antonio Tamer, Slack alias @at"
+# Set Flags
+# -----------------------------------
+# Flags which can be overridden by user input.
+# Default values are below
+# -----------------------------------
+#args=() #TODO
+image_name=""
+tag_value=""
+build_number=""
+branch_name=""
+repo_type=""
+aws_account_num=""
+aws_region=""
+aws_profile=""
 
-def is_pr() {
-  env.CHANGE_BRANCH && env.CHANGE_TARGET
+function die() {
+  die() { echo "$*" 1>&2 ; exit 1; }
 }
 
-if (is_pr() && env.CHANGE_TARGET == 'master') {
-  dry_run = true
-} else if (env.BRANCH_NAME == 'master') {
-  dry_run = false
-} else {
-  echo 'failing as this job only supports master'
-  currentBuild.result = 'FAILURE'
-  return
+function errorIfEmpty() {
+  name=$1
+  value=$2
+  if [[ ${value} == "" ]]; then
+    die "${name}" is required
+  fi
 }
 
-podTemplate(
-  containers: [
-    containerTemplate(
-      name: 'jnlp',
-      image: 'jenkins/jnlp-slave:3.10-1-alpine',
-      args: '${computer.jnlpmac} ${computer.name}',
-      envVars: [
-        envVar(key: 'JENKINS_TUNNEL', value: 'jenkins-agent:50000'         ),
-        envVar(key: 'JENKINS_URL'   , value: 'http://jenkins-internal:8080'),
-      ]
-    ),
-    containerTemplate(
-      name: 'docker',
-      image: "docker",
-      ttyEnabled: true,
-      command: 'cat',
-      alwaysPullImage: true
-    ),
-    containerTemplate(
-      name: 'k8sops',
-      image: "232624534379.dkr.ecr.us-west-2.amazonaws.com/k8sops:latest",
-      ttyEnabled: true,
-      command: 'cat',
-      alwaysPullImage: true
-    )
-  ],
-  imagePullSecrets: ["quay.io"],
-  envVars: [
-    envVar(key: 'BUILD_NUMBER', value: "${env.BUILD_NUMBER}"),
-    secretEnvVar(key: 'AWS_ACCESS_KEY_ID'    , secretName: 'aws-iam', secretKey: 'AWS_ACCESS_KEY_ID'),
-    secretEnvVar(key: 'AWS_SECRET_ACCESS_KEY', secretName: 'aws-iam', secretKey: 'AWS_SECRET_ACCESS_KEY'),
-  ],
-  volumes: [
-    hostPathVolume(mountPath: '/var/run/docker.sock', hostPath: '/var/run/docker.sock'),
-  ]
-){
-  node(POD_LABEL) {
-    try {
-      notifySlack()
-      def myRepo = checkout scm
-      def gitCommit = myRepo.GIT_COMMIT
-      def gitBranch = myRepo.GIT_BRANCH
-      def images = imagesToBuild.join(" ")
+function mainScript() {
+  errorIfEmpty "image_name" ${image_name}
+  errorIfEmpty "tag_value" ${tag_value}
+  errorIfEmpty "build_number" ${build_number}
+  errorIfEmpty "branch_name" ${branch_name}
+  errorIfEmpty "repo_type" ${repo_type}
 
-      stage("prep build") {
-          container('k8sops') {
-            sh "mkdir -p ~/.docker"
-            config_aws(region)
-          }
-      }
-      stage("build images") {
-        parallel createImages(imagesToBuild, gitCommit)
-      }
-      stage("push images") {
-        parallel pushImages(imagesToBuild, gitCommit, gitBranch, region,
-                            orgSharedServicesAccountNumber, orgSharedServicesProfile, dry_run)
-      }
+  docker_target_image_name=""
 
-    } catch (e) {
-      currentBuild.result = 'FAILURE'
-      throw e
-    }
-    finally {
-      notifySlack(currentBuild.result)
-      stage("cleanup") {
-        container('docker') {
-            sh "echo all done"
-        }
-      }
-    }
-  }
+  if [[ ${repo_type} == "ecr" ]]; then
+    errorIfEmpty "aws_account_num" $aws_account_num
+    errorIfEmpty "aws_region" ${aws_region}
+    errorIfEmpty "aws_profile" ${aws_profile}
+
+    $(aws ecr --profile ${aws_profile} get-login --no-include-email --region ${aws_region})
+    docker_target_image_name="${aws_account_num}.dkr.ecr.${aws_region}.amazonaws.com/${image_name}"
+  fi
+
+  docker tag ${image_name}:${tag_value} ${docker_target_image_name}:latest
+  docker tag ${image_name}:${tag_value} ${docker_target_image_name}:${tag_value}
+  docker tag ${image_name}:${tag_value} ${docker_target_image_name}:local_build_${build_number}
+  docker tag ${image_name}:${tag_value} ${docker_target_image_name}:${branch_name}
+  docker tag ${image_name}:${tag_value} ${docker_target_image_name}:latest
+  docker push ${docker_target_image_name}:${tag_value}
+  docker push ${docker_target_image_name}:local_build_${build_number}
+  docker push ${docker_target_image_name}:${branch_name}
+  docker push ${docker_target_image_name}:latest
 }
 
-def config_aws(region) {
-  // Note: we use the config_aws.sh from the repo here because it doesn't exist
-  // in a container for us at genesis.
-  sh (
-    label: "Create AWS config profiles for ${region}",
-    script: """
-        $WORKSPACE/scripts/config_aws.sh --region ${region}
-    """
-  )
+############## Begin Options and Usage ###################
+# Print usage
+usage() {
+  echo -n "${scriptName} [OPTION]... [FILE]...
+
+This pushes a build docker image to a docker registry. It also tags
+the image before push.
+
+Supported registries are:
+  - ecr
+
+ Options:
+  --image-name      Name of Docker image *required *required
+  --build-number    The jenkins build number for this job *required
+  --branch-name     The branch in git *required
+  --tag-value       Git commit hash *required
+  --version         Output version information and exit
+  -h, --help        Display this help and exit
+"
 }
 
-def notifySlack(String buildStatus = 'STARTED') {
-  buildStatus = buildStatus ?: 'SUCCESS'
+# Iterate over options breaking -ab into -a -b when needed and --foo=bar into
+# --foo bar
+optstring=h
+unset options
+while (($#)); do
+  case $1 in
+    # If option is of type -ab
+    -[!-]?*)
+      # Loop over each character starting with the second
+      for ((i=1; i < ${#1}; i++)); do
+        c=${1:i:1}
 
-  def color
-  def emoji
+        # Add current char to options
+        options+=("-$c")
 
-  if (buildStatus == 'STARTED') {
-    color = '#D4DADF'
-    emoji = ':shaler-hair:'
-  } else if (buildStatus == 'SUCCESS') {
-    color = '#BDFFC3'
-    emoji = ':shaler_happy_face:'
-  } else if (buildStatus == 'UNSTABLE') {
-    color = '#FFFE89'
-    emoji = ':shaler_neutral-annoyed:'
-  } else {
-    color = '#FF9FA1'
-    emoji = ':shaler_frown:'
-  }
+        # If option takes a required argument, and it's not the last char make
+        # the rest of the string its argument
+        if [[ $optstring = *"$c:"* && ${1:i+1} ]]; then
+          options+=("${1:i+1}")
+          break
+        fi
+      done
+      ;;
 
-  def msg = "${buildStatus}: `${env.JOB_NAME}` #${env.BUILD_NUMBER}: ${emoji}\n${env.RUN_DISPLAY_URL}"
+    # If option is of type --foo=bar
+    --?*=*) options+=("${1%%=*}" "${1#*=}") ;;
+    # add --endopts for --
+    --) options+=(--endopts) ;;
+    # Otherwise, nothing special
+    *) options+=("$1") ;;
+  esac
+  shift
+done
+set -- "${options[@]}"
+unset options
 
-  slackSend(color: color, message: msg)
-}
+# Print help if no arguments were passed.
+# Uncomment to force arguments when invoking the script
+# [[ $# -eq 0 ]] && set -- "--help"
 
-def createImages(images, tag) {
-  def opMap = [:]
-  images.each { image ->
-    opMap[image] = {
-        stage ("build ${image}") {
-            container('docker') {
-                sh """
-                docker build --network=host . --target=${image} -t ${image}:${tag} -t ${image}:latest
-                """
-            }
-        }
-        stage ("test ${image}") {
-            container('k8sops') {
-                sh """
-                ${WORKSPACE}/tests/${image}_test.sh
-                """
-            }
-        }
-    }
-  }
-  return opMap
-}
+# Read the options and set stuff
+while [[ $1 = -?* ]]; do
+  case $1 in
+    -h|--help) usage >&2;;
+    --version) echo "$(basename $0) ${version} ${maintainer}";;
+    --image-name) image_name=$2; shift;;
+    --build-number) build_number=$2; shift;;
+    --branch-name) branch_name=$2; shift;;
+    --tag-value) tag_value=$2; shift;;
+    --repo-type) repo_type=$2; shift;;
+    --aws-account-num) aws_account_num=$2; shift;;
+    --aws-region) aws_region=$2; shift;;
+    --aws-profile) aws_profile=$2; shift;;
+    --endopts) shift; break ;;
+    *) die "invalid option: '$1'." ;;
+  esac
+  shift
+done
 
-def pushImages(images, tag, branch, region, orgSharedServicesAccountNumber, orgSharedServicesProfile, dry_run) {
-  def opMap = [:]
-  images.each { image ->
-    opMap[image] = {
-        stage ("push ${image}") {
-            container('k8sops') {
-                if (dry_run) {
-                    sh "echo dry run: skipping push to ecr"
-                } else {
-                    // sh "apk add docker"
-                    sh "echo pushing ${image} to ecr"
-                    sh """
-                       ${WORKSPACE}/push_to_docker_registry.sh \
-                         --image-name ${image} \
-                         --tag-value ${tag} \
-                         --build-number ${env.BUILD_NUMBER} \
-                         --branch-name ${branch} \
-                         --repo-type ecr \
-                         --aws-account-num ${orgSharedServicesAccountNumber} \
-                         --aws-region ${region} \
-                         --aws-profile ${orgSharedServicesProfile}
-                       """
-                }
-            }
-        }
-    }
-  }
-  return opMap
-}
+# Store the remaining part as arguments. #TODO
+#args+=("$@")
+
+############## End Options and Usage ###################
+
+# Run your script
+mainScript
