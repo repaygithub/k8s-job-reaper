@@ -2,7 +2,7 @@
 
 DEFAULT_TTL=${DEFAULT_TTL:-1 day}  # delete Jobs finished before this time (if TTL not provided for the Job) -- empty string means never delete by default
 DEFAULT_TTL_FAILED=${DEFAULT_TTL_FAILED:-5 days}  # same as above but for unfinished Jobs (DEFAULT_TTL *must* be set for this to take effect) -- empty string means never delete failed Jobs by default
-NS_BLACKLIST=(${NS_BLACKLIST})  # do NOT delete Jobs from these namespaces (space delimited list)
+NS_BLACKLIST=(${NS_BLACKLIST:-kube-system})  # do NOT delete Jobs from these namespaces (space delimited list)
 
 function get_exp_date {
   local offset=$1
