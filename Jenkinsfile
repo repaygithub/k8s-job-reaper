@@ -64,7 +64,16 @@ if (is_dev() || (is_pr() && env.CHANGE_TARGET == 'develop')) {
 }
 
 podTemplate(
-  label: label,
+  yaml: """
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    spotinst.io/restrict-scale-down: 'true'
+spec:
+  nodeSelector:
+    spotinst.io/node-lifecycle: od
+""",
   containers: [
     containerTemplate(
       name: 'jnlp',
@@ -114,7 +123,7 @@ podTemplate(
     hostPathVolume(mountPath: '/var/run/docker.sock', hostPath: '/var/run/docker.sock'),
   ]
 ){
-  node(label) {
+  node(POD_LABEL) {
     try {
       def myRepo = checkout scm
       def gitCommit = myRepo.GIT_COMMIT
