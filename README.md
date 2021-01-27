@@ -49,8 +49,29 @@ where `[IMAGE_URL]` is the full URL of the container image you want to build/pus
 This tool also supports the following configurations.
 | Field        | Location    | Description  | Default 
 | ------------- |---------| -------|-----
-| `DEFAULT_TTL`  | Environment variable in [cronjob.yaml](k8s/cronjob.yaml) |  An optional global default TTL for completed Jobs | `""`
+| `DEFAULT_TTL`  | Environment variable in [cronjob.yaml](k8s/cronjob.yaml) |  An optional global default TTL for completed Jobs, this does not take precedence over an annotation set in your manifest file. If a ttl is set within your mainfest file and your job does not complete in that span of time, the reaper will wait for both a ttl expiration and a success on the job | `""`
 | `DEFAULT_TTL_FAILED` | Environment variable in [cronjob.yaml](k8s/cronjob.yaml) | An optional global default TTL for uncompleted/failed Jobs (`DEFAULT_TTL` **must** also be set for this to take effect) | `""`
 | `NS_BLACKLIST` | Environment variable in [cronjob.yaml](k8s/cronjob.yaml) |   A list of Kubernetes Namespaces (**space-delimited**) to ignore when looking for Jobs | `"kube-system"`
 | `schedule` | Field in [cronjob.yaml](k8s/cronjob.yaml) | The cron schedule at which to look for Jobs to delete | `"0 */1 * * *"` (once an hour)
 
+
+## How to look at logs
+
+You can look into the logs of the reaper pod using the below. Note, your pod name will differ, select the latest one. 
+
+```sh
+kubectl get pods -n kube-system
+kubectl logs job-reaper-1611779520-sh8qg -n kube-system
+```
+
+you will see something similar to the below 
+
+```sh
+starting reaper with:
+  DEFAULT_TTL: 1 minutes
+  DEFAULT_TTL_FAILED: 12 hours
+  NS_BLACKLIST:
+Finished job kube-system/example-job-nottl expired (at 2021-01-27T16:43:10Z) due to global TTL(1 minutes), deleting
+job.batch "example-job-nottl" deleted
+reaper finished
+```
