@@ -54,6 +54,20 @@ This tool also supports the following configurations.
 | `NS_BLACKLIST` | Environment variable in [cronjob.yaml](k8s/cronjob.yaml) |   A list of Kubernetes Namespaces (**space-delimited**) to ignore when looking for Jobs | `"kube-system"`
 | `schedule` | Field in [cronjob.yaml](k8s/cronjob.yaml) | The cron schedule at which to look for Jobs to delete | `"0 */1 * * *"` (once an hour)
 
+## Use-case Scenarios: 
+* Delete Jobs and their pods after their completion
+* Delete Pods stuck in a Pending state (not yet available)
+* Delete Pods in Evicted state (not yet available)
+* Delete orphaned Pods (Pods without an owner in non-running state) (not yet available )
+
+NOTE: if the namespace ignore flag is set, nothing will happen below 
+
+| Repay Default TTL (12 hours)                | ttl annotation                   | job                           |
+| -------------------------- | ----------------------------------------------------- | ----------------------------- |
+| set     | ttl annotation is set to say 5 hours     | the job and corresponding pod will be deleted on a successfull status when ttl or default ttl is met, whichever comes first |
+| set        | no ttl annotation is set     | the job and corresponding pod will be deleted when default ttl is met |
+
+
 
 ## How to look at logs
 
