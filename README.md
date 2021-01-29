@@ -55,22 +55,33 @@ This tool also supports the following configurations.
 | `schedule` | Field in [cronjob.yaml](k8s/cronjob.yaml) | The cron schedule at which to look for Jobs to delete | `"0 */1 * * *"` (once an hour)
 
 ## Use-case Scenarios: 
-* Delete Jobs and their pods after their completion
-* Delete Pods stuck in a Pending state (not yet available)
-* Delete Pods in Evicted state (not yet available)
-* Delete orphaned Pods (Pods without an owner in non-running state) (not yet available )
 
-NOTE: if the namespace ignore flag is set, nothing will happen below 
+* .status.active = The number of actively running pods (integer)
+* .status.succeeded = The number of pods which reached phase Succeeded
+* .status.failed = The number of pods which reached phase Failed
+* creationTimestamp = a string representing an RFC 3339 date of the date and time an object was created
+* completionTimestamp =  Represents time when the job was completed. It is represented in RFC3339 form and is in UTC.
 
-| Repay Default TTL (12 hours)                | ttl annotation                   | job                           |
-| -------------------------- | ----------------------------------------------------- | ----------------------------- |
-| set     | ttl annotation is set to say 5 hours     | the job and corresponding pod will be deleted on a successfull status when ttl or default ttl is met, whichever comes first |
-| set        | no ttl annotation is set     | the job and corresponding pod will be deleted when default ttl is met |
+NOTE: There will always be a DEFAULT_TTL and a DEFAULT_TTL_FAILED of 12 hours 
 
+| NS_BLACKLIST | DEFAULT_TTL | DEFAULT_TTL_FAILED |ttl annotation|.status.active | .status.succeeded | result |
+| ------------| ------------------- | ----------------| -----------------| ------------------| -------------------| ---------------|
+| set | NA | NA | NA | NA | NA | no job will be deleted since NA_BLACKLIST is set |
+| not set | set | set | set | 0 | 1 | job will get deleted when it reaches ttl annotation limit or DEFAULT_TTL whichever come first based on completionTimestamp |
+| not set | set | set | not set | 0 | 0 | jobs will get deleted based on DEFAULT_TTL_FAILED based on creationTimestamp
+| not set | set | set | set | 0 | 0 | jobs will get deleted based on DEFAULT_TTL_FAILED based on creationTimestamp
 
+NOTE: If active flag is set to one above, no pods will ever get deleted, those pods can include pending, evicted or orphaned.
 
-## How to look at logs
+## How to troubleshoot
 
+### How to find status of metadata and status of jobs for above use case scenarios 
+
+```sh
+kubectl get jobs --all-namespaces -o json | jq -r ".items[] | select( .metadata | has(\"ownerReferences\") | not) | [.metadata.name,.metadata.namespace,.metadata.creationTimestamp,.status.completionTime,.metadata.annotations.ttl,.status.active,.status.succeeded] | @csv" |  sed 's/"//g'
+```
+
+### How to log at logs 
 You can look into the logs of the reaper pod using the below. Note, your pod name will differ, select the latest one. 
 
 ```sh
